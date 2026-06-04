@@ -1,0 +1,19 @@
+# Build artifacts
+/bin/
+*.exe
+*.test
+*.out
+
+# Checkpoints / large weight files
+/checkpoints/
+*.bin
+*.pt
+*.pth
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+.claude/
