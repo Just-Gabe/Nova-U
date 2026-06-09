@@ -48,33 +48,24 @@ MARKDOWN_EXTENSIONS = {".md", ".mdx", ".markdown"}
 
 # --- Extratores ---
 
-def extract_pdf_pymupdf(filepath):
-    import fitz
-    doc = fitz.open(filepath)
-    pages = []
-    for page in doc:
-        text = page.get_text()
-        if text.strip():
-            pages.append(text.strip())
-    doc.close()
-    return "\n\n".join(pages)
-
-
-def extract_pdf_pdftotext(filepath):
-    import subprocess
-    result = subprocess.run(["pdftotext", filepath, "-"], capture_output=True, text=True)
-    return result.stdout.strip()
-
-
 def extract_pdf(filepath):
     try:
-        return extract_pdf_pymupdf(filepath)
-    except Exception:
-        try:
-            return extract_pdf_pdftotext(filepath)
-        except Exception as e:
-            print(f"[AVISO] PDF falhou: {filepath}: {e}", file=sys.stderr)
-            return ""
+        import fitz
+    except ImportError:
+        print("[ERRO] PyMuPDF (fitz) não está instalado. Instale com: pip install PyMuPDF", file=sys.stderr)
+        return ""
+    try:
+        doc = fitz.open(filepath)
+        pages = []
+        for page in doc:
+            text = page.get_text()
+            if text.strip():
+                pages.append(text.strip())
+        doc.close()
+        return "\n\n".join(pages)
+    except Exception as e:
+        print(f"[AVISO] PDF falhou: {filepath}: {e}", file=sys.stderr)
+        return ""
 
 
 def extract_text_file(filepath):
