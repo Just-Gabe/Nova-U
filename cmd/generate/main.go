@@ -15,11 +15,12 @@ func main() {
 	weightsPath := flag.String("weights", "", "path to model weights (.bin or .json)")
 	vocabPath := flag.String("vocab", "", "path to vocab.json from training")
 	prompt := flag.String("prompt", "", "input prompt")
-	maxLen := flag.Int("max-len", 128, "maximum generation length")
-	temp := flag.Float64("temp", 0.8, "sampling temperature")
-	topK := flag.Int("topk", 40, "top-k sampling parameter")
-	dModel := flag.Int("dmodel", 128, "model dimension")
-	seqLen := flag.Int("seq-len", 128, "max sequence length")
+maxLen := flag.Int("max-len", 128, "maximum generation length")
+temp := flag.Float64("temp", 0.8, "sampling temperature")
+topK := flag.Int("topk", 40, "top-k sampling parameter")
+dModel := flag.Int("dmodel", 128, "model dimension")
+seqLen := flag.Int("seq-len", 256, "model max sequence length")
+contextLen := flag.Int("context", 256, "sliding window context size (<= seq-len)")
 	vocabFlag := flag.Int("vocab-size", 0, "vocab size (ignored if -vocab is given)")
 	flag.Parse()
 
@@ -37,17 +38,23 @@ func main() {
 		log.Printf("no -vocab given; defaulting -vocab-size=%d (codepoint mode)", vocabSize)
 	}
 
+	ctxLen := *contextLen
+	if ctxLen > *seqLen {
+		ctxLen = *seqLen
+	}
+
 	cfg := model.DefaultARConfig()
 	cfg.UNetConfig.VocabSize = vocabSize
 	cfg.UNetConfig.DModel = *dModel
 	cfg.UNetConfig.MaxSeqLen = *seqLen
+	cfg.ContextLen = ctxLen
 	cfg.MaxGenLen = *maxLen
 	cfg.Temperature = float32(*temp)
 	cfg.TopK = *topK
 
 	log.Printf("Nova-U generation configuration:")
 	log.Printf("  vocab_size=%d, d_model=%d", vocabSize, *dModel)
-	log.Printf("  max_len=%d, temp=%.2f, top_k=%d", *maxLen, *temp, *topK)
+	log.Printf("  context=%d, max_len=%d, temp=%.2f, top_k=%d", ctxLen, *maxLen, *temp, *topK)
 
 	ar := model.NewARModel(cfg)
 

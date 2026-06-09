@@ -19,6 +19,7 @@ const (
 type ARConfig struct {
 	UNetConfig    UNetConfig
 	MaxGenLen     int
+	ContextLen    int
 	SamplingMode  SamplingMode
 	Temperature   float32
 	TopK          int
@@ -66,15 +67,23 @@ func (m *ARModel) Generate(context []int, maxSteps int) []int {
 	seq[len(context)] = m.Config.BOSID
 
 	gran := 1 << uint(m.Config.UNetConfig.NumLevels) // 2^levels
+	ctxLen := m.Config.ContextLen
+	if ctxLen <= 0 {
+		ctxLen = m.Config.UNetConfig.MaxSeqLen
+	}
 	maxLen := m.Config.UNetConfig.MaxSeqLen
 
 	for step := 0; step < maxSteps; step++ {
+		if len(seq) > ctxLen {
+			copy(seq, seq[len(seq)-ctxLen:])
+			seq = seq[:ctxLen]
+		}
+
 		blockSize := len(seq)
 		if blockSize > maxLen {
 			blockSize = maxLen
 		}
 		inp := seq[len(seq)-blockSize:]
-		realLen := len(inp)
 
 		// Pad on the LEFT with PadID so the most recent token is at the last
 		// position (where we read logits from). This avoids letting the model
@@ -91,7 +100,6 @@ func (m *ARModel) Generate(context []int, maxSteps int) []int {
 		if nextTok == m.Config.EOSID {
 			break
 		}
-		_ = realLen
 	}
 	return seq
 }
