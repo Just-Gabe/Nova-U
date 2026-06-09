@@ -5,10 +5,10 @@ inference engine (cmd/generate).
 
 Usage in Colab:
   !pip install torch numpy
-  # Optional: produce a deterministic vocab from the Go side so both stacks
-  # share the exact same char-to-id map:
-  #   go run ./cmd/train -data text.txt -vocab-out vocab.json
+  # Plain text:
   !python train_colab.py --data text.txt --vocab vocab.json --export model.bin
+  # JSONL conversations (Novo Seguros dataset):
+  !python train_colab.py --jsonl dataset.jsonl --export model.bin
 """
 
 import argparse
@@ -19,6 +19,7 @@ import re
 import struct
 import time
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -225,8 +226,77 @@ def export_weights_binary(model, path):
     print(f"weights exported (binary) to {path}")
 
 
+def export_weights_quantized(model, path, group_size=32, num_bits=4):
+    import struct
+    state = model.state_dict()
+    entries = []
+    for py_name, tensor in state.items():
+        go_name = to_go_name(py_name)
+        if "norm" in py_name or "pos_encoder" in py_name:
+            continue
+        w = tensor.detach().cpu().numpy().astype("<f4")
+        w_flat = w.flatten()
+        n = len(w_flat)
+        n_groups = (n + group_size - 1) // group_size
+        qsize = n
+        if num_bits == 4:
+            qsize = (n + 1) // 2
+        elif num_bits == 2:
+            qsize = (n + 3) // 4
+        packed = np.zeros(qsize, dtype=np.uint8)
+        scales = np.zeros(n_groups, dtype="<f4")
+        zeros = np.zeros(n_groups, dtype="<f4")
+        for g in range(n_groups):
+            start = g * group_size
+            end = min(start + group_size, n)
+            chunk = w_flat[start:end]
+            lo, hi = chunk.min(), chunk.max()
+            scale = (hi - lo) / ((1 << num_bits) - 1)
+            if scale == 0:
+                scale = 1.0
+            scales[g] = scale
+            zeros[g] = lo
+            indices = np.round((chunk - lo) / scale).clip(0, (1 << num_bits) - 1).astype(np.uint8)
+            for j, idx in enumerate(indices):
+                pos = start + j
+                if num_bits == 4:
+                    byte_pos = pos // 2
+                    shift = 4 * (pos % 2)
+                    packed[byte_pos] |= idx << shift
+                elif num_bits == 2:
+                    byte_pos = pos // 4
+                    shift = 2 * (pos % 4)
+                    packed[byte_pos] |= idx << shift
+        shape = list(w.shape)
+        entries.append((go_name, shape, group_size, num_bits, packed, scales, zeros))
+    with open(path, "wb") as f:
+        f.write(b"QNOV")
+        f.write(struct.pack("<I", 1))
+        f.write(struct.pack("<I", len(entries)))
+        for name, shape, gs, nb, packed, scales, zeros in entries:
+            name_bytes = name.encode("utf-8")
+            f.write(struct.pack("<H", len(name_bytes)))
+            f.write(name_bytes)
+            f.write(struct.pack("<B", len(shape)))
+            for d in shape:
+                f.write(struct.pack("<i", int(d)))
+            f.write(struct.pack("<H", gs))
+            f.write(struct.pack("<B", nb))
+            total_elems = int(np.prod(shape))
+            f.write(struct.pack("<i", total_elems))
+            f.write(struct.pack("<i", len(packed)))
+            f.write(packed.tobytes())
+            for s in scales:
+                f.write(struct.pack("<f", s))
+            for z in zeros:
+                f.write(struct.pack("<f", z))
+    print(f"weights exported (quantized {num_bits}-bit) to {path}, group_size={group_size}")
+
+
 def export_weights(model, path):
-    if path.endswith(".bin"):
+    if path.endswith(".qnv"):
+        export_weights_quantized(model, path)
+    elif path.endswith(".bin"):
         export_weights_binary(model, path)
     else:
         export_weights_json(model, path)
@@ -257,6 +327,38 @@ def train_epoch(model, dataloader, optimizer, device):
     return total_loss / max(num_batches, 1)
 
 
+SYSTEM_MARKER = "<|sys|>"
+USER_MARKER = "<|usr|>"
+ASSISTANT_MARKER = "<|ast|>"
+END_MARKER = "<|end|>"
+
+
+def format_conversation(conv):
+    parts = []
+    for msg in conv["conversations"]:
+        role = msg["role"]
+        content = msg["content"]
+        if role == "system":
+            parts.append(f"{SYSTEM_MARKER}\n{content}\n{END_MARKER}\n")
+        elif role == "user":
+            parts.append(f"{USER_MARKER}\n{content}\n{END_MARKER}\n")
+        elif role == "assistant":
+            parts.append(f"{ASSISTANT_MARKER}\n{content}\n{END_MARKER}\n")
+    return "".join(parts)
+
+
+def load_jsonl_dataset(path):
+    texts = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            conv = json.loads(line)
+            texts.append(format_conversation(conv))
+    return texts
+
+
 def main():
     parser = argparse.ArgumentParser(description="Nova-U Colab Training")
     parser.add_argument("--epochs", type=int, default=10)
@@ -264,18 +366,27 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--seq-len", type=int, default=128)
-    parser.add_argument("--data", type=str, required=True, help="path to training text")
+    parser.add_argument("--data", type=str, default=None, help="path to training text (.txt)")
+    parser.add_argument("--jsonl", type=str, default=None, help="path to JSONL conversation dataset")
     parser.add_argument("--vocab", type=str, default="vocab.json",
                         help="path to vocab.json (loaded if exists, else built)")
     parser.add_argument("--export", type=str, default="model.bin",
                         help=".bin (Go binary format) or .json")
     args = parser.parse_args()
 
+    if not args.data and not args.jsonl:
+        raise SystemExit("either --data (txt) or --jsonl must be provided")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"using device: {device}")
 
-    with open(args.data, "r") as f:
-        text = f.read()
+    if args.jsonl:
+        texts = load_jsonl_dataset(args.jsonl)
+        text = "\n".join(texts)
+        print(f"loaded {len(texts)} conversations from {args.jsonl}")
+    else:
+        with open(args.data, "r") as f:
+            text = f.read()
 
     char_to_id, _ = build_or_load_vocab(text, args.vocab)
     vocab_size = vocab_size_from(char_to_id)

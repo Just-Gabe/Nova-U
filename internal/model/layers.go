@@ -238,7 +238,21 @@ func NewLinear(inFeat, outFeat int) *LinearLayer {
 }
 
 func (l *LinearLayer) Forward(x *tensor.Tensor) *tensor.Tensor {
-	return tensor.Dot(x, l.Weight)
+	out := tensor.Dot(x, l.Weight)
+	if l.Bias != nil {
+		b := l.Bias.Shape[0]
+		n := out.Shape[0]
+		lastDim := out.Shape[len(out.Shape)-1]
+		if lastDim == b {
+			outStride0 := out.Stride(0)
+			for i := 0; i < n; i++ {
+				for j := 0; j < b; j++ {
+					out.Data[i*outStride0+j] += l.Bias.Data[j]
+				}
+			}
+		}
+	}
+	return out
 }
 
 func (l *LinearLayer) Params() map[string]*tensor.Tensor {
