@@ -17,17 +17,33 @@ import (
 // --- JSON format (interop with train_colab.py) ---
 
 func SaveWeights(weights map[string]*tensor.Tensor, path string) error {
-	if strings.HasSuffix(path, ".bin") {
+	switch {
+	case strings.HasSuffix(path, ".bin"):
 		return SaveWeightsBinary(weights, path)
+	case strings.HasSuffix(path, ".qnv"):
+		return fmt.Errorf("SaveWeights does not support .qnv output; use train_colab.py --export model.qnv")
+	default:
+		return SaveWeightsJSON(weights, path)
 	}
-	return SaveWeightsJSON(weights, path)
 }
 
 func LoadWeights(path string) (map[string]*tensor.Tensor, error) {
-	if strings.HasSuffix(path, ".bin") {
+	switch {
+	case strings.HasSuffix(path, ".qnv"):
+		entries, err := LoadWeightsQuantized(path)
+		if err != nil {
+			return nil, err
+		}
+		weights := make(map[string]*tensor.Tensor, len(entries))
+		for i := range entries {
+			weights[entries[i].Name] = DequantizeEntry(&entries[i])
+		}
+		return weights, nil
+	case strings.HasSuffix(path, ".bin"):
 		return LoadWeightsBinary(path)
+	default:
+		return LoadWeightsJSON(path)
 	}
-	return LoadWeightsJSON(path)
 }
 
 func SaveWeightsJSON(weights map[string]*tensor.Tensor, path string) error {
